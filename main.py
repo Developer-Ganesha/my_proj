@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Form, Depends
+from fastapi import FastAPI, HTTPException, Form, Depends ,Query
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, Column, Integer, String, Date
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
@@ -77,10 +77,11 @@ class User(Base):
     __tablename__ = "User"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String)
+    email = Column(String,unique=True, index=True)  # ✅ New email field
     contact = Column(String)
     outlet_role = Column(String)
     role = Column(String)
-    status = Column(String)
+    user_status = Column(String)
 
 class Booking(Base):
     __tablename__ = "bookings"
@@ -122,48 +123,81 @@ def create_default_admin():
 async def login(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     admin = db.query(Admin).filter(Admin.email == email, Admin.password == password).first()
     if not admin:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        return{"status":"False", "message":"Invalid credentials"}
     token = create_access_token({"sub": admin.email})
-    return JSONResponse(content={"message": "Login successful", "access_token": token, "token_type": "bearer"})
+    return JSONResponse(content={"status":"True","message": "Login successful", "access_token": token, "token_type": "bearer"})
 
 @app.post("/add_new_users")
-def create_user(name: str = Form(...), contact: str = Form(...), outlet_role: str = Form(...),
-                role: str = Form(...), status: str = Form(...), db: Session = Depends(get_db)):
-    user = User(name=name, contact=contact, outlet_role=outlet_role, role=role, status=status)
+def create_user(
+    name: str = Form(...),
+    email: str = Form(...),  # ✅ New parameter
+    contact: str = Form(...),
+    outlet_role: str = Form(...),
+    role: str = Form(...),
+    user_status: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    user = User(
+        name=name,
+        email=email,
+        contact=contact,
+        outlet_role=outlet_role,
+        role=role,
+        user_status=user_status
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
-    sheet.append_row([str(user.id), user.name, user.contact, user.outlet_role, user.role, user.status])
-    return {"message": "User added", "results": user}
 
+    sheet.append_row([
+        str(user.id), user.name, user.email, user.contact, user.outlet_role, user.role, user.user_status
+    ])
+    return {"status": "True", "message": "User added", "results": user}
+
+# Update user API
 @app.put("/update_user/{id}")
-def update_user(id: int, name: str = Form(...), contact: str = Form(...), outlet_role: str = Form(...),
-                role: str = Form(...), status: str = Form(...), db: Session = Depends(get_db)):
+def update_user(
+    id: int,
+    name: str = Form(...),
+    email: str = Form(...),  # ✅ New parameter
+    contact: str = Form(...),
+    outlet_role: str = Form(...),
+    role: str = Form(...),
+    user_status: str = Form(...),
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(User.id == id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        return {"status": "False", "message": "User not found"}
+
     user.name = name
+    user.email = email
     user.contact = contact
     user.outlet_role = outlet_role
     user.role = role
-    user.status = status
+    user.user_status = user_status
     db.commit()
     db.refresh(user)
+
     all_data = sheet.get_all_records()
     for idx, row in enumerate(all_data, start=2):
         if str(row.get("id")) == str(user.id):
-            sheet.update(f"A{idx}:F{idx}", [[str(user.id), user.name, user.contact, user.outlet_role, user.role, user.status]])
+            sheet.update(f"A{idx}:G{idx}", [[
+                str(user.id), user.name, user.email, user.contact,
+                user.outlet_role, user.role, user.user_status
+            ]])
             break
-    return {"message": "User updated", "results": user}
+    return {"status": "True", "message": "User updated", "results": user}
 
-@app.delete("/delete_user/{name}")
-def delete_user(name: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.name == name).first()
+# Delete user by ID
+@app.delete("/delete_user/{id}")
+def delete_user(id: int, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        return {"status": "False","message":"User not found"}
     db.delete(user)
     db.commit()
-    return {"message": f"User '{name}' deleted"}
+    return {"status": "True", "message": f"User '{id}' deleted"}
 
 @app.get("/api/users")
 def get_users():
@@ -177,11 +211,11 @@ def get_users():
             "email": row.get("Email", ""),
             "contact": row.get("Worker Phone", ""),
             "outlet_type": row.get("Outlet", ""),
-            "roles": [r.strip() for r in row.get("Roles", "").split(",") if r],
-            "status": row.get("Status", ""),
+            "roles": row.get("Roles", "").strip() if row.get("Roles", "").strip() else "",
+            "user_status": row.get("Status", ""),
             "availability_days": row.get("Availability", "")
         } for row in reader]
-        return {"message": "Users fetched", "results": users}
+        return {"status":"True","message": "Users fetched", "results": users}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
