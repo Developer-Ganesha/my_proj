@@ -40,14 +40,8 @@ gc = gspread.authorize(credentials)
 # ----------------- Google Sheets Setup -----------------
 SHEET_ID = "1WX44a8gOrTPs4nmqjfSCAwn99QtFBiy72JeyLDNquMQ"
 GID_MAP = {
-    "cancellations": "1689593326",
-    "upcoming": "1840935840",
-    "past":"304133303",
-    "schedule": "1739684591",
-    "standby":"2043157366",
-    "sheet1": "0"
-}
-
+    "cancellations": "1689593326","upcoming": "1840935840",  "past":"304133303",
+    "schedule": "1739684591","sheet1": "0"}
 sheet = gc.open_by_key(SHEET_ID).worksheet("Sheet1")
 
 def get_csv_url(sheet_name: str) -> str:
@@ -104,7 +98,7 @@ class StandbyWorker(Base):
     contact = Column(String)
     roles = Column(String)  # comma-separated roles
     outlet = Column(String)
-    status = Column(String)  # e.g., Available, Low reliability, Confirmed
+    user_status = Column(String)  # e.g., Available, Low reliability, Confirmed
     days_available = Column(Integer)
     availability_date = Column(Date)
 Base.metadata.create_all(bind=engine)
@@ -220,18 +214,47 @@ def get_users():
         response.raise_for_status()
         reader = csv.DictReader(io.StringIO(response.text))
         users = [{
-            "name": row.get("Name", ""),
-            "email": row.get("Email", ""),
-            "contact": row.get("Worker Phone", ""),
-            "outlet_type": row.get("Outlet", ""),
-            "roles": row.get("Roles", "").strip() if row.get("Roles", "").strip() else "",
-            "user_status": row.get("Status", ""),
+            "name": row.get("name", ""),
+            "email": row.get("email", ""),
+            "contact": row.get("contact", ""),
+            "outlet_type": row.get("outlet_role", ""),
+            "roles": row.get("roles", "").strip() if row.get("roles", "").strip() else "",
+            "user_status": row.get("user_status", ""),
             "availability_days": row.get("Availability", "")
         } for row in reader]
         return {"status":"True","message": "Users fetched", "results": users}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/users/search")
+def search_user_by_email_or_name(search: str = Query(..., description="Name or Email of the user")):
+    try:
+        url = get_csv_url("sheet1")
+        response = requests.get(url)
+        response.raise_for_status()
+        reader = csv.DictReader(io.StringIO(response.text))
+
+        query_lower = query.strip().lower()
+
+        for row in reader:
+            name = row.get("Name", "").strip().lower()
+            email = row.get("Email", "").strip().lower()
+
+            if query_lower == name or query_lower == email:
+                user = {
+                    "name": row.get("Name", ""),
+                    "email": row.get("Email", ""),
+                    "contact": row.get("Worker Phone", ""),
+                    "outlet_type": row.get("Outlet", ""),
+                    "roles": row.get("Roles", "").strip(),
+                    "user_status": row.get("Status", ""),
+                    "availability_days": row.get("Availability", "")
+                }
+                return {"status": "True", "message": "User found", "results": user}
+
+        return {"status": "False", "message": "User not found"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 @app.get("/upcoming bookings/{sheet_name}")
 def fetch_google_sheet(sheet_name: str):
     try:
@@ -245,36 +268,119 @@ def fetch_google_sheet(sheet_name: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-sheet = gc.open_by_key(SHEET_ID).worksheet("standby")
-
-def get_csv_url(sheet_name: str) -> str:
-    gid = GID_MAP.get(sheet_name.lower())
-    if not gid:
-        raise ValueError(f"Sheet name '{sheet_name}' not found.")
-    return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
+def get_google_sheet():
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
+    gc = gspread.authorize(credentials)
+    return gc.open_by_key(SHEET_ID).worksheet("standby")
 
 @app.post("/standby/add")
-def add_to_standby_form( name: str = Form(...), contact: str = Form(...),roles: str = Form(...),
-    outlet: str = Form(...),status: str = Form(...),days_available: int = Form(...),availability_date: str = Form(...),
-    db: Session = Depends(get_db)):
+def add_to_standby_form( name: str = Form(...), contact: str = Form(...),  roles: str = Form(...),  outlet: str = Form(...),
+    user_status: str = Form(...), days_available: int = Form(...),  availability_date: str = Form(...), db: Session = Depends(get_db)):
     try:
         parsed_date = datetime.strptime(availability_date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-    # Add to database
-    worker = StandbyWorker( name=name,  contact=contact, roles=roles,  outlet=outlet, status=status,
-        days_available=days_available, availability_date=parsed_date )
+    worker = StandbyWorker(
+        name=name,
+        contact=contact,
+        roles=roles,
+        outlet=outlet,
+        user_status=user_status,
+        days_available=days_available,
+        availability_date=parsed_date )
     db.add(worker)
     db.commit()
     db.refresh(worker)
-    # Add to Google Sheet
     try:
         sheet = get_google_sheet()
-        sheet.append_row([ name, contact,  roles,  outlet,  status, days_available, parsed_date.isoformat() ])
+        sheet.append_row([
+            str(worker.id), name, contact, roles, outlet, user_status, days_available, parsed_date.isoformat() ])
+        print("✅ Data added to standby sheet")
     except Exception as e:
-        print(f"Failed to write to Google Sheet: {e}")
-    return {"status": "True", "message": "Worker added to standby", "results": worker}
-# ----------------- Run Uvicorn -----------------
+        print(f"❌ Failed to write to Google Sheet: {e}")
+    return {
+        "status": "True",
+        "message": "Worker added to standby",
+        "results": {
+            "id": worker.id,
+            "name": name,
+            "contact": contact,
+            "roles": roles,
+            "outlet": outlet,
+            "user_status": user_status,
+            "days_available": days_available,
+            "availability_date": parsed_date.isoformat() } }
+
+@app.get("/standby/all")
+def get_all_standby_workers():
+    try:
+        sheet = get_google_sheet()
+        rows = sheet.get_all_values()
+        if len(rows) <= 1:
+            return {"status": "True", "message": "No data found", "results": []}
+        headers = rows[0]
+        data = [dict(zip(headers, row)) for row in rows[1:]]
+        return {"status": "True", "message": "Data fetched", "results": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data: {e}")
+
+@app.get("/standby/{worker_id}")
+def get_worker_by_id(worker_id: str):
+    try:
+        sheet = get_google_sheet()
+        rows = sheet.get_all_values()
+        headers = rows[0]
+        for row in rows[1:]:
+            if row[0] == worker_id:
+                return {"status": "True", "message": "Worker found", "results": dict(zip(headers, row))}
+        raise HTTPException(status_code=404, detail="Worker not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch data: {e}")
+@app.post("/standby/assign")
+def assign_standby_worker(
+    worker_id: str = Form(...),
+    assigned_by: str = Form(...),
+    assigned_outlet: str = Form(...),
+    assignment_notes: str = Form("")
+):
+    try:
+        sheet = get_google_sheet()
+        rows = sheet.get_all_values()
+
+        headers = rows[0]
+        updated = False
+
+        # Prepare assignment log (can also store in DB if needed)
+        assign_log = {
+            "worker_id": worker_id,
+            "assigned_by": assigned_by,
+            "assigned_outlet": assigned_outlet,
+            "assignment_notes": assignment_notes,
+            "assigned_at": datetime.utcnow().isoformat()
+        }
+
+        # Find and update worker row (optional)
+        for idx, row in enumerate(rows[1:], start=2):  # start=2 because Google Sheets are 1-indexed + header
+            if row[0] == worker_id:
+                # Example: Add "Assigned" note to the last column
+                sheet.update_cell(idx, len(headers) + 1, "✅ Assigned")
+                updated = True
+                break
+
+        if not updated:
+            raise HTTPException(status_code=404, detail="Worker not found")
+
+        print(f"✅ Assigned worker {worker_id} to outlet {assigned_outlet}")
+
+        return {
+            "status": "True",
+            "message": f"Worker {worker_id} assigned successfully",
+            "assignment": assign_log
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to assign: {e}")        
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
